@@ -3,7 +3,7 @@
 [Back to Record & Replay](README.md) |
 [Identity prerequisites](IDENTITY-SETUP.md)
 
-This is a customer installation checklist for the **1.9.14 MCP-browser
+This is a customer installation checklist for the **MCP-browser
 activation profile**, not a source-build or Marketplace publishing guide.
 Obtain the approved offer/version and any release verification utilities
 from the offering owner.
@@ -31,6 +31,250 @@ does not add private endpoints, a firewall, VPN or network peering.
 Customers requiring a different isolation topology should obtain an approved
 deployment design rather than assuming this offer creates it.
 
+### Installation identities and Azure permissions
+
+Keep the following identities separate. Azure RBAC does not replace the
+Blueprint federation, MCP consent or Windows 365 prerequisites in
+[identity setup](IDENTITY-SETUP.md).
+
+| Identity | Installation responsibility | Required preparation |
+|---|---|---|
+| Installing human or deployment account | Creates the Managed Application and selects existing identities | Approved resource-deployment and role-assignment permissions at the installation scopes; **Managed Identity Operator** on each supplied UAMI to attach it |
+| Shared runtime/activation UAMI | Runs UI/API, the Functions executor and the readiness-gated activation installer | Create it before installation and configure its Blueprint FIC; supply its full resource ID in **Existing shared runtime and activation managed identity resource ID** |
+| Dedicated existing-Foundry deployment UAMI | Authorizes linked-resource deployments and scoped grants outside the managed resource group | Required only when reusing Foundry with a package exposing **Existing Foundry deployment managed identity resource ID**; pre-authorize it as described below |
+| Managed Applications On Behalf Application | Azure platform service principal performing Managed Application deployment operations | Ensure effective permission to read and attach supplied external UAMIs; see the separate on-behalf-of guidance below |
+| Generated `video-copy-*` and `image-push-*` UAMIs | Agent/package installation and application-image installation | Created and granted scoped access by the offering; do not enter these generated identities in the customer UAMI fields |
+
+Use the full UAMI Azure resource ID, not its client ID or principal/object ID:
+
+```text
+/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>
+```
+
+The shared runtime UAMI is required for both new and existing Foundry, even
+when automatic activation is disabled. The dedicated Foundry deployment UAMI
+is a different security boundary; do not give the runtime UAMI broad deployment
+or RBAC-administration privileges.
+
+#### Shared runtime/activation UAMI
+
+The offering creates scoped Azure assignments for the shared identity during
+installation. These include runtime access to Storage, Cosmos DB, ACR, Foundry
+and telemetry, plus the following assignments when activation is selected:
+
+| Role | Scope / purpose |
+|---|---|
+| Container Apps Contributor | Deployed UI/API Container App, for activation configuration |
+| Website Contributor | Deployed executor Function App, for activation configuration |
+| Log Analytics Reader | Installation Log Analytics workspace, for ingestion verification |
+| Foundry User (`53ca6127-db72-4b80-b1b0-d745d6d5456d`) | Selected Foundry project, for readiness probes |
+| Storage Blob Data Contributor | Installation receipt container |
+| Reader | Installer container groups whose completion must be verified |
+
+These are installer-created scoped grants, not a request to assign Contributor
+or Owner to the runtime identity across the subscription. Its privileges are
+shared by runtime and activation because they use the same UAMI. The runtime
+UAMI needs no Microsoft Graph provisioning permissions or Blueprint ownership
+for this activation profile; an authorized identity administrator configures
+the Blueprint FIC separately before activation.
+
+#### Dedicated deployment UAMI when reusing Foundry
+
+When reusing Foundry, supply a separate, pre-authorized UAMI in
+**Existing Foundry deployment managed identity resource ID**.
+
+Before installation, an Azure administrator must grant the dedicated UAMI:
+
+| Role / permission | Scope |
+|---|---|
+| Contributor, or a narrower approved role permitting `Microsoft.Resources/deployments/*`, resource-group read and the necessary Foundry reads | **Existing Foundry resource group**, not merely the identity's resource group |
+| Role Based Access Control Administrator, preferably with approved delegation conditions | **Existing Foundry account**; child-project grants inherit this scope |
+| Managed Identity Operator, if this identity is the effective deployment caller attaching the separately supplied runtime UAMI | The **shared runtime UAMI resource**, when not already covered by approved access |
+
+Contributor alone cannot create role assignments. Delegation must permit the
+template to assign Cognitive Services User
+(`a97b65f3-24c7-4388-baec-2e87135dc908`) to the generated agent installer and
+shared runtime UAMI; assign the installer a constrained Role Based Access
+Control Administrator role
+(`f58310d9-a9f6-439a-9e8d-f62e7b41a168`); and, when activation is enabled,
+assign Foundry User to the runtime UAMI at the project.
+
+The installer's constrained delegation permits only Cognitive Services User
+role-assignment creation and prohibits deletion. Permission to assign the
+RBAC Administrator role is itself privileged: have the security owner constrain
+allowed roles and recipient principals where practical, and avoid
+subscription-wide Owner. The optional helper below deliberately uses
+unconditioned account-scoped delegation only with explicit security approval.
+
+The package attaches the dedicated UAMI to the Managed Application through
+the special `managedIdentity` form output. It does not create that UAMI or
+grant its prerequisite permissions. Confirm effective assignments and any
+required PIM activation before installation.
+
+#### Managed Applications On Behalf Application
+
+This is the Azure platform enterprise application, **not** the runtime UAMI,
+Agent Identity Blueprint, Agent Identity or human UI sign-in application.
+Identify the caller from the actual authorization error and verify its service
+principal in the installation tenant before assigning any roles. The previously
+observed application/client ID was
+`35cbcc06-defd-44d2-ace4-bc2bf2466970`; its service-principal object ID is
+tenant-specific and must not be copied from another installation.
+
+For externally supplied identities, an administrator should verify the
+following narrowly scoped access for the effective on-behalf-of caller:
+
+| Permission | Recommended built-in role and scope |
+|---|---|
+| Read an existing UAMI and attach it to a deployed resource (`Microsoft.ManagedIdentity/userAssignedIdentities/read` and `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`) | **Managed Identity Operator** on the exact shared runtime UAMI and, when selected, the dedicated Foundry deployment UAMI |
+| Create resources and scoped role assignments inside the managed resource group | Provided through the approved Managed Application deployment authorization; verify the offer configuration rather than manually granting subscription-wide Owner |
+
+Granting the installing user Managed Identity Operator does not grant that
+permission to the platform service principal. Likewise, a role granted to a
+UAMI controls what that UAMI can do; it does not authorize another principal
+to attach it. Use the caller object ID and scope in an `AuthorizationFailed`
+error to distinguish these cases.
+
+If the on-behalf-of caller lacks `Microsoft.Resources/deployments/write` in
+the **existing Foundry resource group**, first verify that the approved preview
+package includes linked-resource identity support, the selected dedicated UAMI
+is attached to the Managed Application, and its Contributor/custom-role and
+RBAC delegation assignments are effective. Do not routinely grant the shared
+platform principal Contributor, Owner or RBAC Administrator over the
+subscription or existing Foundry resource group as a workaround. Escalate
+unexpected caller/scope behavior to the deployment owner.
+
+References:
+[Managed Identity Operator permissions](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/identity#managed-identity-operator),
+[Managed Applications linked-resource identity](https://learn.microsoft.com/azure/azure-resource-manager/managed-applications/publish-managed-identity#linking-existing-azure-resources),
+and [constrained RBAC delegation](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-overview).
+
+### Optional permission setup script
+
+Download [Set-InstallationPermissions.ps1](Set-InstallationPermissions.ps1)
+and review it with your Azure administrator. It requires PowerShell 7, Azure
+CLI and `az login` to the intended customer tenant. Run it as a principal
+authorized to read the resources and create the requested scoped assignments.
+Any required PIM privileges must already be active.
+
+The script does not create managed identities, deploy the application, configure
+Blueprint federation, change Graph consent or grant runtime data-plane roles.
+It previews by default. It checks existing/inherited assignments for the same
+principal and role and skips existing grants without changing their conditions.
+Conditional grants generate a warning because their restrictions may block installation.
+It does not evaluate all effective permissions or remove broader existing
+access. It does not change the active Azure CLI subscription.
+
+For **new Foundry**, preview identity-attachment permissions:
+
+```powershell
+$permissions = @{
+    SubscriptionId = '<installation-subscription-id>'
+    RuntimeIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<runtime-mi>'
+    OnBehalfPrincipalObjectId = '<verified-platform-service-principal-object-id>'
+}
+.\Set-InstallationPermissions.ps1 @permissions
+```
+
+For interactive Azure CLI login, the installer defaults to the signed-in user.
+The script uses `az ad signed-in-user show` to read that user's tenant-local
+object ID and prints the selected principal, type and source before applying
+permissions. This is a read-only Microsoft Graph lookup; it does not change
+directory permissions or consent. The active CLI user and tenant must match
+the installation subscription login. A context mismatch or lookup failure
+stops the script rather than guessing an identity.
+
+If the permissions administrator is not the person who will install the offer,
+override the installer explicitly:
+
+```powershell
+$permissions.InstallerPrincipalObjectId = '<actual-installer-object-id>'
+$permissions.InstallerPrincipalType = 'User'
+```
+
+For service-principal or managed-identity Azure CLI login, both installer
+parameters must be supplied explicitly. Use `ServicePrincipal` for an automation
+installer or `Group` for an approved installer group. Explicit overrides skip
+the signed-in-user lookup.
+
+Supply tenant-local **object IDs**, not application/client IDs, for installer
+overrides and `OnBehalfPrincipalObjectId`. Verify the on-behalf-of enterprise
+application with the identity administrator; the script does not discover that
+principal through Graph.
+
+For **existing Foundry**, additionally supply the separate deployment UAMI
+and account resource ID. No delegation condition file or generated installer
+principal ID is required.
+
+```powershell
+$permissions.DeploymentIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<deployment-mi>'
+$permissions.FoundryAccountResourceId = '/subscriptions/<installation-subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.CognitiveServices/accounts/<account-name>'
+.\Set-InstallationPermissions.ps1 @permissions
+```
+
+The Foundry account must be in the installation subscription. The simplified
+helper assigns **RBAC Administrator without a delegation condition** at that
+account scope. This permits unrestricted role-assignment management at the
+account and its children, including delegation of privileged roles. The
+separate Contributor grant covers the existing Foundry resource group.
+Obtain explicit security-owner approval for this access. If policy requires
+constrained delegation, use an administrator-approved alternative rather than
+this helper.
+
+Review the preview's principal IDs and exact scopes. For **new Foundry**, apply:
+
+```powershell
+.\Set-InstallationPermissions.ps1 @permissions -Apply -Confirm
+```
+
+For **existing Foundry**, explicitly acknowledge the unconditioned account
+RBAC grant when applying:
+
+```powershell
+.\Set-InstallationPermissions.ps1 @permissions -Apply -AllowUnrestrictedFoundryRbac -Confirm
+```
+
+The opt-in is required before any writes if the unconditioned RBAC assignment
+is missing. A preview or `-WhatIf` does not require the opt-in. A rerun where
+all required grants already exist skips them without requiring another opt-in,
+including conditional assignments, which are preserved unchanged.
+If you still have `DelegationConditionFile` in an existing `$permissions`
+hashtable, remove that obsolete entry before running the updated script:
+
+```powershell
+$permissions.Remove('DelegationConditionFile')
+```
+
+Existing Foundry adds Contributor on its resource group, unconditioned
+RBAC Administrator on its account, and Managed Identity Operator for the
+deployment identity on the runtime UAMI. Both installer and platform caller
+receive Managed Identity Operator only on the supplied identity resources.
+There is no subscription-wide Owner or platform-principal Foundry Contributor
+grant.
+
+The script prints each assignment's role, principal and scope, with
+`CREATED`, `ALREADY PRESENT - skipped`, or `NOT APPLIED`. Matching existing
+assignments are successful and are never recreated. The final summary shows
+the number created, already present and still missing. For example, a rerun
+after all required grants exist prints:
+
+```text
+PASS: All 7 required role assignments match. Created: 0; already present: 7.
+```
+
+`PREVIEW ONLY` means no changes were made and missing permissions still need
+to be applied. `INCOMPLETE` means some assignments were declined. CLI errors
+stop the script with an error. Existing conditional assignments are skipped,
+not replaced. If only conditional assignments cover a requested grant, the
+summary reports `REVIEW REQUIRED` instead of `PASS`; the script continues with
+other missing grants, but the conditions may still block installation.
+
+Azure role assignments are not transactional. A failed later create does not
+roll back earlier assignments; the script reports errors and can be rerun to
+skip matching grants. Allow RBAC propagation before installing. Successful
+assignment creation is not proof of effective authorization, working federation
+or completed application installation.
+
 ## 2. Prepare deployment inputs
 
 Use the form tooltips and an approved customer handover worksheet.
@@ -39,6 +283,7 @@ Never put tokens or credentials into these fields.
 | Input | What to provide |
 |---|---|
 | Existing shared UAMI resource ID | Customer-owned identity for API, executor and installer |
+| Existing Foundry deployment UAMI resource ID | Separate pre-authorized linked-resource identity; required only when reusing Foundry |
 | Blueprint client ID | Existing verified Agent Identity Blueprint |
 | Agent Identity ID | Enabled instance linked to that Blueprint |
 | Agent User object ID | Linked Agent User's actual object ID |
@@ -80,7 +325,7 @@ controls just to make cleanup finish.
 Resources and guards begin with execution/new-run admission disabled.
 Automatic activation is not an unconditional enable switch.
 
-For 1.9.14, the installer must verify:
+The installer must verify:
 
 1. Installed runtime payloads and the API's actual MCP identity exchange.
 2. The executor's independent identity exchange.
