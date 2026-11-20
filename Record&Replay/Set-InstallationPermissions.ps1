@@ -181,6 +181,7 @@ else {
     Write-Warning 'Role assignments are not transactional. If a later create fails, earlier successful creates remain. Resolve the error and rerun; existing matching grants are skipped.'
 }
 
+$counts = @{ Created = 0; AlreadyPresent = 0; Planned = 0 }
 foreach ($grant in $grants) {
     $status = if ($grant.Existing) { 'AlreadyPresent' } else { 'Planned' }
     if ($Apply -and -not $grant.Existing -and
@@ -205,6 +206,13 @@ foreach ($grant in $grants) {
         }
         $status = 'Created'
     }
+    $counts[$status]++
+    $label = switch ($status) {
+        'AlreadyPresent' { 'ALREADY PRESENT - skipped' }
+        'Created' { 'CREATED' }
+        'Planned' { 'NOT APPLIED' }
+    }
+    Write-Information "[$label] $($grant.Role) | Principal: $($grant.PrincipalId) | Scope: $($grant.Scope)" -InformationAction Continue
     [pscustomobject]@{
         Status = $status
         PrincipalId = $grant.PrincipalId
@@ -212,4 +220,15 @@ foreach ($grant in $grants) {
         Scope = $grant.Scope
         Condition = $grant.Condition
     }
+}
+
+if ($counts.Planned -eq 0) {
+    Write-Information "PASS: All $($grants.Count) required role assignments match. Created: $($counts.Created); already present: $($counts.AlreadyPresent). Existing matching permissions are not an error." -InformationAction Continue
+    Write-Information 'RBAC propagation and end-to-end installation authorization still require verification.' -InformationAction Continue
+}
+elseif (-not $Apply -or $WhatIfPreference) {
+    Write-Information "PREVIEW ONLY: Already present: $($counts.AlreadyPresent); missing: $($counts.Planned). No assignments were created by this run. Use -Apply without -WhatIf after approval." -InformationAction Continue
+}
+else {
+    Write-Warning "INCOMPLETE: Created: $($counts.Created); already present: $($counts.AlreadyPresent); not applied: $($counts.Planned). Some assignments were declined; prerequisites are not complete."
 }

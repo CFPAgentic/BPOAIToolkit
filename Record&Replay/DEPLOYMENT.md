@@ -214,6 +214,22 @@ receive Managed Identity Operator only on the supplied identity resources.
 There is no subscription-wide Owner or platform-principal Foundry Contributor
 grant.
 
+The script prints each assignment's role, principal and scope, with
+`CREATED`, `ALREADY PRESENT - skipped`, or `NOT APPLIED`. Matching existing
+assignments are successful and are never recreated. The final summary shows
+the number created, already present and still missing. For example, a rerun
+after all required grants exist prints:
+
+```text
+PASS: All 7 required role assignments match. Created: 0; already present: 7.
+```
+
+`PREVIEW ONLY` means no changes were made and missing permissions still need
+to be applied. `INCOMPLETE` means some assignments were declined. CLI errors
+and conflicting delegation conditions stop the script with an error; an
+existing assignment with different conditions requires administrator review,
+not automatic replacement.
+
 Azure role assignments are not transactional. A failed later create does not
 roll back earlier assignments; the script reports errors and can be rerun to
 skip matching grants. Allow RBAC propagation before installing. Successful

@@ -83,8 +83,9 @@ $conditionPath = Join-Path ([IO.Path]::GetTempPath()) ("bpo-condition-test-$([gu
 try {
     # This fixture is deliberately not a deployable or approved RBAC condition.
     [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
-    $preview = @(& $ScriptPath @parameters)
+    $preview = @(& $ScriptPath @parameters -InformationVariable previewMessages)
     Assert-True ($preview.Count -eq 2 -and $fixture.Creates.Count -eq 0) 'New Foundry preview must plan two grants without writes.'
+    Assert-True (($previewMessages.MessageData -join "`n") -match 'PREVIEW ONLY: Already present: 0; missing: 2') 'Preview must report missing grants without claiming success.'
     Assert-True (@($preview | Where-Object { $_.Scope -ne $runtimeId -or $_.Role -ne 'Managed Identity Operator' }).Count -eq 0) 'Attachment grants must stay on the supplied identity.'
 
     $existingParameters = $parameters.Clone()
@@ -108,14 +109,17 @@ try {
     catch { if ($_.Exception.Message -notlike '*separate runtime*') { throw } }
     Assert-True ($fixture.Creates.Count -eq 0) 'Invalid inputs must cause no writes.'
 
-    $null = & $ScriptPath @existingParameters -Apply -WhatIf
+    $null = & $ScriptPath @existingParameters -Apply -WhatIf -InformationVariable whatIfMessages
     Assert-True ($fixture.Creates.Count -eq 0) 'WhatIf must never create assignments.'
-    $applied = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    Assert-True (($whatIfMessages.MessageData -join "`n") -match 'PREVIEW ONLY: Already present: 0; missing: 7') 'WhatIf must not report unapplied grants as passed.'
+    $applied = @(& $ScriptPath @existingParameters -Apply -Confirm:$false -InformationVariable applyMessages)
     Assert-True ($fixture.Creates.Count -eq 7 -and @($applied | Where-Object Status -ne 'Created').Count -eq 0) 'Apply must create and verify seven grants.'
+    Assert-True (($applyMessages.MessageData -join "`n") -match 'PASS: All 7 required role assignments match. Created: 7; already present: 0') 'Apply must report a clear passing count.'
     $delegationCall = @($fixture.Creates | Where-Object { (Get-Option $_ '--role') -eq 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' })
     Assert-True ((Get-Option $delegationCall[0] '--condition-version') -eq '2.0') 'Condition version must reach Azure CLI.'
-    $repeated = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    $repeated = @(& $ScriptPath @existingParameters -Apply -Confirm:$false -InformationVariable repeatMessages)
     Assert-True ($fixture.Creates.Count -eq 7 -and @($repeated | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'A repeated apply must skip matching assignments.'
+    Assert-True (($repeatMessages.MessageData -join "`n") -match 'PASS: All 7 required role assignments match. Created: 0; already present: 7') 'Existing matching permissions must pass, not fail.'
 
     ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = ''
     try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected condition conflict.' }
