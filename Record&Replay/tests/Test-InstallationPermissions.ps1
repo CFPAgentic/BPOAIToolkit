@@ -1,6 +1,7 @@
 #Requires -Version 7.0
 param(
-    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Set-InstallationPermissions.ps1')
+    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Set-InstallationPermissions.ps1'),
+    [string]$SamplePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'foundry-delegation-condition.sample.txt')
 )
 
 Set-StrictMode -Version Latest
@@ -131,6 +132,40 @@ try {
     $existingParameters.DeploymentIdentityResourceId = $deploymentId
     $existingParameters.FoundryAccountResourceId = $foundryId
     $existingParameters.DelegationConditionFile = $conditionPath
+    $sample = Get-Content -LiteralPath $SamplePath -Raw
+    $sampleParameters = $existingParameters.Clone()
+    $sampleParameters.DelegationConditionFile = $SamplePath
+    try { & $ScriptPath @sampleParameters -Apply -Confirm:$false; throw 'Expected unresolved sample rejection.' }
+    catch { if ($_.Exception.Message -notlike '*unresolved sample placeholders*') { throw } }
+    Assert-True ($fixture.Creates.Count -eq 0) 'Unresolved sample conditions must be rejected before writes.'
+    $agentInstallerPrincipal = '99999999-aaaa-bbbb-cccc-dddddddddddd'
+    $resolvedSample = $sample.Replace('<AGENT_INSTALLER_PRINCIPAL_ID>', $agentInstallerPrincipal).Replace('<RUNTIME_MI_PRINCIPAL_ID>', $runtimePrincipal)
+    function Test-SampleRequest {
+        param([string]$Action, [string]$RoleId, [string]$PrincipalId)
+        $expression = [regex]::Replace($resolvedSample, "ActionMatches\{'([^']+)'\}", {
+            param($match)
+            if ($match.Groups[1].Value -eq $Action) { '$true' } else { '$false' }
+        })
+        $expression = [regex]::Replace($expression, '@Request\[Microsoft.Authorization/roleAssignments:(RoleDefinitionId|PrincipalId)\] ForAnyOfAnyValues:GuidEquals \{([^}]+)\}', {
+            param($match)
+            $value = if ($match.Groups[1].Value -eq 'RoleDefinitionId') { $RoleId } else { $PrincipalId }
+            if (($match.Groups[2].Value.Split(',').Trim()) -contains $value) { '$true' } else { '$false' }
+        })
+        $expression = $expression -replace '\bAND\b', '-and' -replace '\bOR\b', '-or' -replace '!', '-not ' -replace '\s+', ' '
+        return & ([scriptblock]::Create($expression))
+    }
+    $writeAction = 'Microsoft.Authorization/roleAssignments/write'
+    Assert-True (Test-SampleRequest $writeAction 'a97b65f3-24c7-4388-baec-2e87135dc908' $runtimePrincipal) 'Sample must allow runtime inference access.'
+    Assert-True (Test-SampleRequest $writeAction 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $agentInstallerPrincipal) 'Sample must allow delegation only to the named agent installer.'
+    Assert-True (Test-SampleRequest $writeAction '53ca6127-db72-4b80-b1b0-d745d6d5456d' $runtimePrincipal) 'Sample must allow runtime project readiness access.'
+    Assert-True (-not (Test-SampleRequest $writeAction 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $runtimePrincipal)) 'Sample must not delegate RBAC administration to the runtime identity.'
+    Assert-True (-not (Test-SampleRequest $writeAction 'a97b65f3-24c7-4388-baec-2e87135dc908' $deploymentPrincipal)) 'Sample must not grant access to unrelated recipients.'
+    Assert-True (-not (Test-SampleRequest $writeAction '8e3af657-a8ff-443c-a75c-2fe8c4bcb635' $agentInstallerPrincipal)) 'Sample must not permit Owner grants.'
+    Assert-True (-not (Test-SampleRequest 'Microsoft.Authorization/roleAssignments/delete' 'a97b65f3-24c7-4388-baec-2e87135dc908' $runtimePrincipal)) 'Sample must deny role-assignment deletion.'
+    [IO.File]::WriteAllText($conditionPath, $resolvedSample)
+    $samplePreview = @(& $ScriptPath @existingParameters)
+    Assert-True (($samplePreview | Where-Object Role -eq 'Role Based Access Control Administrator').Condition -ceq $resolvedSample.Trim()) 'A resolved sample must be forwarded without silently changing its condition.'
+    [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
     $preview = @(& $ScriptPath @existingParameters)
     Assert-True ($preview.Count -eq 7 -and $fixture.Creates.Count -eq 0) 'Existing Foundry preview must plan seven scoped grants without writes.'
     $delegation = @($preview | Where-Object Role -eq 'Role Based Access Control Administrator')

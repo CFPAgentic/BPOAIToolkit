@@ -204,6 +204,43 @@ For **existing Foundry**, additionally supply the separate deployment UAMI,
 account resource ID and a local UTF-8 text file containing the security owner's
 approved Azure RBAC delegation condition expression:
 
+Start with
+[foundry-delegation-condition.sample.txt](foundry-delegation-condition.sample.txt).
+Copy it to a customer-owned file, replace the placeholders below, then obtain
+administrator approval. The supplied sample is deliberately **not ready to
+apply**; the script rejects unresolved placeholders.
+
+```powershell
+Copy-Item '.\foundry-delegation-condition.sample.txt' '.\approved-foundry-delegation-condition.txt'
+```
+
+| Placeholder | Replacement |
+|---|---|
+| `<RUNTIME_MI_PRINCIPAL_ID>` | Shared runtime UAMI's principal/object ID, not its client ID or resource ID |
+| `<AGENT_INSTALLER_PRINCIPAL_ID>` | Verified principal/object ID of this installation's generated `video-copy-*` UAMI, not `image-push-*`, the human installer or the deployment UAMI |
+
+The sample permits Cognitive Services User grants to the agent installer and
+runtime identity, RBAC Administrator grants only to the agent installer, and
+Foundry User grants only to the runtime identity. It blocks role-assignment
+deletion. Apply the enclosing role assignment only at the selected Foundry
+account scope.
+
+**Fresh-installation limitation:** the agent installer's principal ID is
+generated during deployment and cannot be inferred from its resource name.
+This sample cannot establish all permissions before a fresh installation
+unless the verified identity is already available through an approved staged
+installation procedure. Have the deployment/security owner arrange that
+procedure or approve another suitable delegation design. Do not start a
+deployment just to make it fail, copy a principal from another installation,
+or remove the recipient restriction to avoid this prerequisite.
+
+Recipient restrictions do not enforce the condition on a newly delegated RBAC
+Administrator assignment. The deployment template applies the installer's
+inference-only condition; this outer sample cannot certify that nested
+condition or make arbitrary RBAC Administrator delegation safe. Approve both
+the template and this condition. Deletion/cleanup may require a separate
+administrator because the sample intentionally denies role-assignment deletion.
+
 ```powershell
 $permissions.DeploymentIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<deployment-mi>'
 $permissions.FoundryAccountResourceId = '/subscriptions/<installation-subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.CognitiveServices/accounts/<account-name>'

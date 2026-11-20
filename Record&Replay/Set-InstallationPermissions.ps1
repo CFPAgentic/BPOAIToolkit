@@ -114,6 +114,9 @@ if ($hasFoundryInputs) {
     if ([string]::IsNullOrWhiteSpace($condition)) {
         throw 'The administrator-approved delegation condition file must not be empty.'
     }
+    if ($condition -match '<[A-Z][A-Z0-9_]*>') {
+        throw 'The delegation condition contains unresolved sample placeholders. Replace them with verified principal object IDs and obtain administrator approval before running.'
+    }
 }
 
 $account = Invoke-AzJson -Arguments @('account', 'show', '--subscription', "$SubscriptionId")

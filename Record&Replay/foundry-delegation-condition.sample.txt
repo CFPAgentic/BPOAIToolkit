@@ -1,0 +1,27 @@
+(
+  (
+    !(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})
+  )
+  OR
+  (
+    @Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {a97b65f3-24c7-4388-baec-2e87135dc908}
+    AND
+    @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {<AGENT_INSTALLER_PRINCIPAL_ID>, <RUNTIME_MI_PRINCIPAL_ID>}
+  )
+  OR
+  (
+    @Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {f58310d9-a9f6-439a-9e8d-f62e7b41a168}
+    AND
+    @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {<AGENT_INSTALLER_PRINCIPAL_ID>}
+  )
+  OR
+  (
+    @Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {53ca6127-db72-4b80-b1b0-d745d6d5456d}
+    AND
+    @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {<RUNTIME_MI_PRINCIPAL_ID>}
+  )
+)
+AND
+(
+  !(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})
+)
