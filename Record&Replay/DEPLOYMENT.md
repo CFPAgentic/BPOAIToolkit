@@ -31,6 +31,125 @@ does not add private endpoints, a firewall, VPN or network peering.
 Customers requiring a different isolation topology should obtain an approved
 deployment design rather than assuming this offer creates it.
 
+### Installation identities and Azure permissions
+
+Keep the following identities separate. Azure RBAC does not replace the
+Blueprint federation, MCP consent or Windows 365 prerequisites in
+[identity setup](IDENTITY-SETUP.md).
+
+| Identity | Installation responsibility | Required preparation |
+|---|---|---|
+| Installing human or deployment account | Creates the Managed Application and selects existing identities | Approved resource-deployment and role-assignment permissions at the installation scopes; **Managed Identity Operator** on each supplied UAMI to attach it |
+| Shared runtime/activation UAMI | Runs UI/API, the Functions executor and the readiness-gated activation installer | Create it before installation and configure its Blueprint FIC; supply its full resource ID in **Existing shared runtime and activation managed identity resource ID** |
+| Dedicated existing-Foundry deployment UAMI | Authorizes linked-resource deployments and scoped grants outside the managed resource group | Required only when reusing Foundry with a package exposing **Existing Foundry deployment managed identity resource ID**; pre-authorize it as described below |
+| Managed Applications On Behalf Application | Azure platform service principal performing Managed Application deployment operations | Ensure effective permission to read and attach supplied external UAMIs; see the separate on-behalf-of guidance below |
+| Generated `video-copy-*` and `image-push-*` UAMIs | Agent/package installation and application-image installation | Created and granted scoped access by the offering; do not enter these generated identities in the customer UAMI fields |
+
+Use the full UAMI Azure resource ID, not its client ID or principal/object ID:
+
+```text
+/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>
+```
+
+The shared runtime UAMI is required for both new and existing Foundry, even
+when automatic activation is disabled. The dedicated Foundry deployment UAMI
+is a different security boundary; do not give the runtime UAMI broad deployment
+or RBAC-administration privileges.
+
+#### Shared runtime/activation UAMI
+
+The offering creates scoped Azure assignments for the shared identity during
+installation. These include runtime access to Storage, Cosmos DB, ACR, Foundry
+and telemetry, plus the following assignments when activation is selected:
+
+| Role | Scope / purpose |
+|---|---|
+| Container Apps Contributor | Deployed UI/API Container App, for activation configuration |
+| Website Contributor | Deployed executor Function App, for activation configuration |
+| Log Analytics Reader | Installation Log Analytics workspace, for ingestion verification |
+| Foundry User (`53ca6127-db72-4b80-b1b0-d745d6d5456d`) | Selected Foundry project, for readiness probes |
+| Storage Blob Data Contributor | Installation receipt container |
+| Reader | Installer container groups whose completion must be verified |
+
+These are installer-created scoped grants, not a request to assign Contributor
+or Owner to the runtime identity across the subscription. Its privileges are
+shared by runtime and activation because they use the same UAMI. The runtime
+UAMI needs no Microsoft Graph provisioning permissions or Blueprint ownership
+for this activation profile; an authorized identity administrator configures
+the Blueprint FIC separately before activation.
+
+#### Dedicated deployment UAMI when reusing Foundry
+
+This linked-resource identity input requires an approved package that supports
+it (introduced in offer build 1.9.15; use 1.9.16 or a later approved build for
+the corrected textbox outputs). It is not an additional input in the original
+1.9.14 profile.
+
+Before installation, an Azure administrator must grant the dedicated UAMI:
+
+| Role / permission | Scope |
+|---|---|
+| Contributor, or a narrower approved role permitting `Microsoft.Resources/deployments/*`, resource-group read and the necessary Foundry reads | **Existing Foundry resource group**, not merely the identity's resource group |
+| Role Based Access Control Administrator, preferably with approved delegation conditions | **Existing Foundry account**; child-project grants inherit this scope |
+| Managed Identity Operator, if this identity is the effective deployment caller attaching the separately supplied runtime UAMI | The **shared runtime UAMI resource**, when not already covered by approved access |
+
+Contributor alone cannot create role assignments. Delegation must permit the
+template to assign Cognitive Services User
+(`a97b65f3-24c7-4388-baec-2e87135dc908`) to the generated agent installer and
+shared runtime UAMI; assign the installer a constrained Role Based Access
+Control Administrator role
+(`f58310d9-a9f6-439a-9e8d-f62e7b41a168`); and, when activation is enabled,
+assign Foundry User to the runtime UAMI at the project.
+
+The installer's constrained delegation permits only Cognitive Services User
+role-assignment creation and prohibits deletion. Permission to assign the
+RBAC Administrator role is itself privileged: have the security owner constrain
+allowed roles and recipient principals where practical, rather than granting
+subscription-wide Owner or unrestricted delegation.
+
+The package attaches the dedicated UAMI to the Managed Application through
+the special `managedIdentity` form output. It does not create that UAMI or
+grant its prerequisite permissions. Confirm effective assignments and any
+required PIM activation before installation.
+
+#### Managed Applications On Behalf Application
+
+This is the Azure platform enterprise application, **not** the runtime UAMI,
+Agent Identity Blueprint, Agent Identity or human UI sign-in application.
+Identify the caller from the actual authorization error and verify its service
+principal in the installation tenant before assigning any roles. The previously
+observed application/client ID was
+`35cbcc06-defd-44d2-ace4-bc2bf2466970`; its service-principal object ID is
+tenant-specific and must not be copied from another installation.
+
+For externally supplied identities, an administrator should verify the
+following narrowly scoped access for the effective on-behalf-of caller:
+
+| Permission | Recommended built-in role and scope |
+|---|---|
+| Read an existing UAMI and attach it to a deployed resource (`Microsoft.ManagedIdentity/userAssignedIdentities/read` and `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`) | **Managed Identity Operator** on the exact shared runtime UAMI and, when selected, the dedicated Foundry deployment UAMI |
+| Create resources and scoped role assignments inside the managed resource group | Provided through the approved Managed Application deployment authorization; verify the offer configuration rather than manually granting subscription-wide Owner |
+
+Granting the installing user Managed Identity Operator does not grant that
+permission to the platform service principal. Likewise, a role granted to a
+UAMI controls what that UAMI can do; it does not authorize another principal
+to attach it. Use the caller object ID and scope in an `AuthorizationFailed`
+error to distinguish these cases.
+
+If the on-behalf-of caller lacks `Microsoft.Resources/deployments/write` in
+the **existing Foundry resource group**, first verify that the approved preview
+package includes linked-resource identity support, the selected dedicated UAMI
+is attached to the Managed Application, and its Contributor/custom-role and
+RBAC delegation assignments are effective. Do not routinely grant the shared
+platform principal Contributor, Owner or RBAC Administrator over the
+subscription or existing Foundry resource group as a workaround. Escalate
+unexpected caller/scope behavior to the deployment owner.
+
+References:
+[Managed Identity Operator permissions](https://learn.microsoft.com/azure/role-based-access-control/built-in-roles/identity#managed-identity-operator),
+[Managed Applications linked-resource identity](https://learn.microsoft.com/azure/azure-resource-manager/managed-applications/publish-managed-identity#linking-existing-azure-resources),
+and [constrained RBAC delegation](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-overview).
+
 ## 2. Prepare deployment inputs
 
 Use the form tooltips and an approved customer handover worksheet.
@@ -39,6 +158,7 @@ Never put tokens or credentials into these fields.
 | Input | What to provide |
 |---|---|
 | Existing shared UAMI resource ID | Customer-owned identity for API, executor and installer |
+| Existing Foundry deployment UAMI resource ID (supported newer packages only) | Separate pre-authorized linked-resource identity; required only when reusing Foundry |
 | Blueprint client ID | Existing verified Agent Identity Blueprint |
 | Agent Identity ID | Enabled instance linked to that Blueprint |
 | Agent User object ID | Linked Agent User's actual object ID |
