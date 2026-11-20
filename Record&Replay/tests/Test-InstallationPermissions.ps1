@@ -77,8 +77,6 @@ function az {
                 principalId = Get-Option $arguments '--assignee-object-id'
                 scope = $scope
                 roleDefinitionId = "/subscriptions/$subscription/providers/Microsoft.Authorization/roleDefinitions/$(Get-Option $arguments '--role')"
-                condition = Get-Option $arguments '--condition'
-                conditionVersion = Get-Option $arguments '--condition-version'
             }
             $fixture.Assignments.Add($assignment)
             return $assignment | ConvertTo-Json
@@ -159,6 +157,12 @@ try {
     Assert-True ($fixture.Creates.Count -eq 7 -and @($repeated | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'A repeated apply must skip matching assignments.'
     Assert-True (($repeatMessages.MessageData -join "`n") -match 'PASS: All 7 required role assignments match. Created: 0; already present: 7') 'Existing matching permissions must pass, not fail.'
 
+    foreach ($assignment in $fixture.Assignments) {
+        $assignment | Add-Member -NotePropertyName condition -NotePropertyValue $null
+    }
+    $fixture.Assignments[0].condition = ''
+    $withOptionalConditions = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    Assert-True ($fixture.Creates.Count -eq 7 -and @($withOptionalConditions | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'Null and empty optional conditions must also pass as existing unconditional grants.'
     ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = 'EXISTING-ADMIN-APPROVED-CONDITION'
     try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected condition conflict.' }
     catch { if ($_.Exception.Message -notlike '*different delegation conditions*') { throw } }

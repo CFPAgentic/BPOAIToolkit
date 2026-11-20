@@ -66,6 +66,12 @@ function Get-Identity {
     return $identity
 }
 
+function Test-AssignmentHasCondition {
+    param([object]$Assignment)
+    $property = $Assignment.PSObject.Properties['condition']
+    return $null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)
+}
+
 function New-Grant {
     param(
         [string]$PrincipalId, [string]$PrincipalType, [string]$Role,
@@ -184,7 +190,7 @@ foreach ($grant in $grants) {
         ($_.roleDefinitionId.Split('/')[-1]) -eq $grant.RoleId
     })
     foreach ($assignment in $matching) {
-        if (-not [string]::IsNullOrWhiteSpace("$($assignment.condition)")) {
+        if (Test-AssignmentHasCondition $assignment) {
             throw "Existing $($grant.Role) assignment has different delegation conditions at $($assignment.scope). Review it manually; no assignments have been changed."
         }
     }
@@ -223,7 +229,7 @@ foreach ($grant in $grants) {
         if ($created.principalId -ne $grant.PrincipalId -or
             $created.scope -ne $grant.Scope -or
             $created.roleDefinitionId.Split('/')[-1] -ne $grant.RoleId -or
-            -not [string]::IsNullOrWhiteSpace("$($created.condition)")) {
+            (Test-AssignmentHasCondition $created)) {
             throw 'Azure returned an assignment that does not match the requested grant. Review the assignment before continuing.'
         }
         $status = 'Created'
