@@ -7,6 +7,7 @@ Requires Azure CLI login and existing identities. Does not create identities,
 change Graph permissions, configure Blueprint federation or deploy resources.
 Existing Foundry uses account-scoped RBAC Administrator without a condition.
 Creating that privileged assignment requires explicit administrator opt-in.
+Existing assignments are skipped without changing their conditions.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -85,6 +86,7 @@ function New-Grant {
         Scope = $Scope
         Condition = ''
         Existing = $false
+        ExistingConditional = $false
     }
 }
 
@@ -178,7 +180,7 @@ if ($hasFoundryInputs) {
     $grants += New-Grant $deployment.principalId 'ServicePrincipal' 'Managed Identity Operator' $operatorRole $runtime.id
 }
 
-# Preflight every assignment before creating any, so conflicts cause no writes.
+# Discover existing assignments before creating missing grants.
 foreach ($grant in $grants) {
     $assignments = @(Invoke-AzJson -Arguments @(
         'role', 'assignment', 'list', '--scope', $grant.Scope, '--include-inherited',
@@ -189,12 +191,15 @@ foreach ($grant in $grants) {
         $_.principalId -eq $grant.PrincipalId -and
         ($_.roleDefinitionId.Split('/')[-1]) -eq $grant.RoleId
     })
-    foreach ($assignment in $matching) {
-        if (Test-AssignmentHasCondition $assignment) {
-            throw "Existing $($grant.Role) assignment has different delegation conditions at $($assignment.scope). Review it manually; no assignments have been changed."
+    $grant.Existing = $matching.Count -gt 0
+    if ($grant.Existing) {
+        $unconditional = @($matching | Where-Object { -not (Test-AssignmentHasCondition $_) })
+        if ($unconditional.Count -eq 0) {
+            $grant.ExistingConditional = $true
+            $grant.Condition = [string]$matching[0].condition
+            Write-Warning "Existing conditional $($grant.Role) assignment at $($matching[0].scope) will be skipped unchanged. Its restrictions may block installation; effective permissions have not been verified."
         }
     }
-    $grant.Existing = $matching.Count -gt 0
 }
 
 $missingPrivilegedGrant = @($grants | Where-Object {
@@ -251,7 +256,13 @@ foreach ($grant in $grants) {
 }
 
 if ($counts.Planned -eq 0) {
-    Write-Information "PASS: All $($grants.Count) required role assignments match. Created: $($counts.Created); already present: $($counts.AlreadyPresent). Existing matching permissions are not an error." -InformationAction Continue
+    $conditionalCount = @($grants | Where-Object ExistingConditional).Count
+    if ($conditionalCount -gt 0) {
+        Write-Warning "REVIEW REQUIRED: All $($grants.Count) roles have assignments. Created: $($counts.Created); already present: $($counts.AlreadyPresent); conditional grants skipped unchanged: $conditionalCount. Installation authorization is not verified."
+    }
+    else {
+        Write-Information "PASS: All $($grants.Count) required role assignments match. Created: $($counts.Created); already present: $($counts.AlreadyPresent). Existing matching permissions are not an error." -InformationAction Continue
+    }
     Write-Information 'RBAC propagation and end-to-end installation authorization still require verification.' -InformationAction Continue
 }
 elseif (-not $Apply -or $WhatIfPreference) {

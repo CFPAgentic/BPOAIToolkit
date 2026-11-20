@@ -160,7 +160,8 @@ Any required PIM privileges must already be active.
 The script does not create managed identities, deploy the application, configure
 Blueprint federation, change Graph consent or grant runtime data-plane roles.
 It previews by default. It checks existing/inherited assignments for the same
-principal and role, skips matching grants, and refuses conflicting conditions.
+principal and role and skips existing grants without changing their conditions.
+Conditional grants generate a warning because their restrictions may block installation.
 It does not evaluate all effective permissions or remove broader existing
 access. It does not change the active Azure CLI subscription.
 
@@ -235,7 +236,8 @@ RBAC grant when applying:
 
 The opt-in is required before any writes if the unconditioned RBAC assignment
 is missing. A preview or `-WhatIf` does not require the opt-in. A rerun where
-all required grants already match skips them without requiring another opt-in.
+all required grants already exist skips them without requiring another opt-in,
+including conditional assignments, which are preserved unchanged.
 If you still have `DelegationConditionFile` in an existing `$permissions`
 hashtable, remove that obsolete entry before running the updated script:
 
@@ -262,9 +264,10 @@ PASS: All 7 required role assignments match. Created: 0; already present: 7.
 
 `PREVIEW ONLY` means no changes were made and missing permissions still need
 to be applied. `INCOMPLETE` means some assignments were declined. CLI errors
-and conflicting delegation conditions stop the script with an error; an
-existing assignment with different conditions requires administrator review,
-not automatic replacement.
+stop the script with an error. Existing conditional assignments are skipped,
+not replaced. If only conditional assignments cover a requested grant, the
+summary reports `REVIEW REQUIRED` instead of `PASS`; the script continues with
+other missing grants, but the conditions may still block installation.
 
 Azure role assignments are not transactional. A failed later create does not
 roll back earlier assignments; the script reports errors and can be rerun to

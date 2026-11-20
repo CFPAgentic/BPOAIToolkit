@@ -64,7 +64,10 @@ function az {
         'role assignment' {
             if ($arguments[2] -eq 'list') {
                 Assert-True ((Get-Option $arguments '--fill-principal-name') -eq 'false') 'Assignment discovery must not resolve principals through Graph.'
-                return ConvertTo-Json -InputObject @($fixture.Assignments.ToArray()) -Depth 5
+                $requestedScope = Get-Option $arguments '--scope'
+                return ConvertTo-Json -InputObject @($fixture.Assignments | Where-Object {
+                    $_.scope -eq $requestedScope -or $requestedScope.StartsWith("$($_.scope)/", [StringComparison]::OrdinalIgnoreCase)
+                }) -Depth 5
             }
             if ($arguments[2] -ne 'create') { throw 'Unexpected role operation.' }
             $fixture.Creates.Add($arguments)
@@ -164,9 +167,14 @@ try {
     $withOptionalConditions = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
     Assert-True ($fixture.Creates.Count -eq 7 -and @($withOptionalConditions | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'Null and empty optional conditions must also pass as existing unconditional grants.'
     ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = 'EXISTING-ADMIN-APPROVED-CONDITION'
-    try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected condition conflict.' }
-    catch { if ($_.Exception.Message -notlike '*different delegation conditions*') { throw } }
-    Assert-True ($fixture.Creates.Count -eq 7) 'Condition conflicts must abort preflight without writes.'
+    $conditional = @(& $ScriptPath @existingParameters -Apply -Confirm:$false -WarningVariable conditionalWarnings -InformationVariable conditionalMessages)
+    Assert-True ($fixture.Creates.Count -eq 7 -and @($conditional | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'Existing conditional assignments must be skipped without requiring privileged opt-in.'
+    Assert-True (($conditionalWarnings -join "`n") -match 'REVIEW REQUIRED' -and ($conditionalMessages.MessageData -join "`n") -notmatch 'PASS:') 'Conditional skips must warn without claiming authorization passed.'
+    Assert-True (@($conditional | Where-Object Condition -eq 'EXISTING-ADMIN-APPROVED-CONDITION').Count -eq 1) 'Output must retain the skipped assignment condition.'
+    $fixture.Assignments.RemoveAt(0)
+    $remaining = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    Assert-True ($fixture.Creates.Count -eq 8 -and @($remaining | Where-Object Status -eq 'Created').Count -eq 1) 'Conditional grants must not prevent creation of other missing assignments.'
+    Assert-True (($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition -eq 'EXISTING-ADMIN-APPROVED-CONDITION') 'Existing delegation restrictions must remain unchanged.'
 
     $fixture.Assignments.Clear()
     $fixture.Creates.Clear()
@@ -177,7 +185,7 @@ try {
     $fixture.ReadFailure = $true
     try { & $ScriptPath @parameters; throw 'Expected CLI read failure.' }
     catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
-    Write-Output 'PASS: installer resolution/context guards, preview, bounded scopes, privileged opt-in, condition-free apply, identity separation, WhatIf, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
+    Write-Output 'PASS: installer resolution/context guards, preview, bounded scopes, privileged opt-in, condition-free apply, identity separation, WhatIf, rerun, conditional skips and CLI failure handling. All Azure CLI calls were mocked.'
 }
 finally {
     if ($null -ne $previousExitCode) { $global:LASTEXITCODE = $previousExitCode.Value }
