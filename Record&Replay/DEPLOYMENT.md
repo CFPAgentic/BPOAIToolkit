@@ -3,7 +3,7 @@
 [Back to Record & Replay](README.md) |
 [Identity prerequisites](IDENTITY-SETUP.md)
 
-This is a customer installation checklist for the **1.9.14 MCP-browser
+This is a customer installation checklist for the **MCP-browser
 activation profile**, not a source-build or Marketplace publishing guide.
 Obtain the approved offer/version and any release verification utilities
 from the offering owner.
@@ -80,10 +80,8 @@ the Blueprint FIC separately before activation.
 
 #### Dedicated deployment UAMI when reusing Foundry
 
-This linked-resource identity input requires an approved package that supports
-it (introduced in offer build 1.9.15; use 1.9.16 or a later approved build for
-the corrected textbox outputs). It is not an additional input in the original
-1.9.14 profile.
+When reusing Foundry, supply a separate, pre-authorized UAMI in
+**Existing Foundry deployment managed identity resource ID**.
 
 Before installation, an Azure administrator must grant the dedicated UAMI:
 
@@ -158,7 +156,7 @@ Never put tokens or credentials into these fields.
 | Input | What to provide |
 |---|---|
 | Existing shared UAMI resource ID | Customer-owned identity for API, executor and installer |
-| Existing Foundry deployment UAMI resource ID (supported newer packages only) | Separate pre-authorized linked-resource identity; required only when reusing Foundry |
+| Existing Foundry deployment UAMI resource ID | Separate pre-authorized linked-resource identity; required only when reusing Foundry |
 | Blueprint client ID | Existing verified Agent Identity Blueprint |
 | Agent Identity ID | Enabled instance linked to that Blueprint |
 | Agent User object ID | Linked Agent User's actual object ID |
@@ -200,7 +198,7 @@ controls just to make cleanup finish.
 Resources and guards begin with execution/new-run admission disabled.
 Automatic activation is not an unconditional enable switch.
 
-For 1.9.14, the installer must verify:
+The installer must verify:
 
 1. Installed runtime payloads and the API's actual MCP identity exchange.
 2. The executor's independent identity exchange.
