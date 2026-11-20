@@ -1,0 +1,140 @@
+#Requires -Version 7.0
+param(
+    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Set-InstallationPermissions.ps1')
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$subscription = '11111111-2222-3333-4444-555555555555'
+$tenant = '22222222-3333-4444-5555-666666666666'
+$runtimeId = "/subscriptions/$subscription/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/runtime-mi"
+$deploymentId = "/subscriptions/$subscription/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/deployment-mi"
+$foundryId = "/subscriptions/$subscription/resourceGroups/foundry/providers/Microsoft.CognitiveServices/accounts/customer-foundry"
+$runtimePrincipal = '33333333-4444-5555-6666-777777777777'
+$deploymentPrincipal = '44444444-5555-6666-7777-888888888888'
+$fixture = @{
+    Creates = [Collections.Generic.List[object]]::new()
+    Assignments = [Collections.Generic.List[object]]::new()
+    FailCreateAt = 0
+    ReadFailure = $false
+}
+$previousExitCode = Get-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
+}
+
+function Get-Option {
+    param([string[]]$Arguments, [string]$Name)
+    $index = [Array]::IndexOf($Arguments, $Name)
+    if ($index -lt 0) { return '' }
+    return $Arguments[$index + 1]
+}
+
+function az {
+    $arguments = @($args)
+    $global:LASTEXITCODE = 0
+    if ($fixture.ReadFailure) {
+        $global:LASTEXITCODE = 1
+        return
+    }
+    switch ($arguments[0..1] -join ' ') {
+        'account show' { return @{tenantId=$tenant;state='Enabled'} | ConvertTo-Json }
+        'identity show' {
+            $id = Get-Option $arguments '--ids'
+            $principal = if ($id -eq $runtimeId) { $runtimePrincipal } else { $deploymentPrincipal }
+            return @{id=$id;principalId=$principal;tenantId=$tenant} | ConvertTo-Json
+        }
+        'resource show' { return @{id=$foundryId} | ConvertTo-Json }
+        'role assignment' {
+            if ($arguments[2] -eq 'list') {
+                Assert-True ((Get-Option $arguments '--fill-principal-name') -eq 'false') 'Assignment discovery must not resolve principals through Graph.'
+                return ConvertTo-Json -InputObject @($fixture.Assignments.ToArray()) -Depth 5
+            }
+            if ($arguments[2] -ne 'create') { throw 'Unexpected role operation.' }
+            $fixture.Creates.Add($arguments)
+            if ($fixture.FailCreateAt -eq $fixture.Creates.Count) {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            $scope = Get-Option $arguments '--scope'
+            $assignment = [pscustomobject]@{
+                principalId = Get-Option $arguments '--assignee-object-id'
+                scope = $scope
+                roleDefinitionId = "/subscriptions/$subscription/providers/Microsoft.Authorization/roleDefinitions/$(Get-Option $arguments '--role')"
+                condition = Get-Option $arguments '--condition'
+                conditionVersion = Get-Option $arguments '--condition-version'
+            }
+            $fixture.Assignments.Add($assignment)
+            return $assignment | ConvertTo-Json
+        }
+        default { throw "Unexpected Azure CLI call: $($arguments -join ' ')" }
+    }
+}
+
+$parameters = @{
+    SubscriptionId = $subscription
+    RuntimeIdentityResourceId = $runtimeId
+    InstallerPrincipalObjectId = '55555555-6666-7777-8888-999999999999'
+    OnBehalfPrincipalObjectId = '66666666-7777-8888-9999-aaaaaaaaaaaa'
+}
+$conditionPath = Join-Path ([IO.Path]::GetTempPath()) ("bpo-condition-test-$([guid]::NewGuid().ToString('N')).txt")
+try {
+    # This fixture is deliberately not a deployable or approved RBAC condition.
+    [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
+    $preview = @(& $ScriptPath @parameters)
+    Assert-True ($preview.Count -eq 2 -and $fixture.Creates.Count -eq 0) 'New Foundry preview must plan two grants without writes.'
+    Assert-True (@($preview | Where-Object { $_.Scope -ne $runtimeId -or $_.Role -ne 'Managed Identity Operator' }).Count -eq 0) 'Attachment grants must stay on the supplied identity.'
+
+    $existingParameters = $parameters.Clone()
+    $existingParameters.DeploymentIdentityResourceId = $deploymentId
+    $existingParameters.FoundryAccountResourceId = $foundryId
+    $existingParameters.DelegationConditionFile = $conditionPath
+    $preview = @(& $ScriptPath @existingParameters)
+    Assert-True ($preview.Count -eq 7 -and $fixture.Creates.Count -eq 0) 'Existing Foundry preview must plan seven scoped grants without writes.'
+    $delegation = @($preview | Where-Object Role -eq 'Role Based Access Control Administrator')
+    Assert-True ($delegation.Count -eq 1 -and $delegation[0].Scope -eq $foundryId -and $delegation[0].Condition -eq 'TEST-ONLY-ADMINISTRATOR-CONDITION') 'Delegation must use the approved condition at the account scope.'
+    $contributor = @($preview | Where-Object Role -eq 'Contributor')
+    Assert-True ($contributor.Count -eq 1 -and $contributor[0].Scope -eq "/subscriptions/$subscription/resourceGroups/foundry") 'Contributor must be scoped to the Foundry resource group.'
+
+    $invalidParameters = $existingParameters.Clone()
+    $invalidParameters.Remove('DelegationConditionFile')
+    try { & $ScriptPath @invalidParameters; throw 'Expected missing-condition rejection.' }
+    catch { if ($_.Exception.Message -notlike '*requires*together*') { throw } }
+    $invalidParameters = $existingParameters.Clone()
+    $invalidParameters.DeploymentIdentityResourceId = $runtimeId
+    try { & $ScriptPath @invalidParameters; throw 'Expected shared-identity rejection.' }
+    catch { if ($_.Exception.Message -notlike '*separate runtime*') { throw } }
+    Assert-True ($fixture.Creates.Count -eq 0) 'Invalid inputs must cause no writes.'
+
+    $null = & $ScriptPath @existingParameters -Apply -WhatIf
+    Assert-True ($fixture.Creates.Count -eq 0) 'WhatIf must never create assignments.'
+    $applied = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    Assert-True ($fixture.Creates.Count -eq 7 -and @($applied | Where-Object Status -ne 'Created').Count -eq 0) 'Apply must create and verify seven grants.'
+    $delegationCall = @($fixture.Creates | Where-Object { (Get-Option $_ '--role') -eq 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' })
+    Assert-True ((Get-Option $delegationCall[0] '--condition-version') -eq '2.0') 'Condition version must reach Azure CLI.'
+    $repeated = @(& $ScriptPath @existingParameters -Apply -Confirm:$false)
+    Assert-True ($fixture.Creates.Count -eq 7 -and @($repeated | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'A repeated apply must skip matching assignments.'
+
+    ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = ''
+    try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected condition conflict.' }
+    catch { if ($_.Exception.Message -notlike '*different delegation conditions*') { throw } }
+    Assert-True ($fixture.Creates.Count -eq 7) 'Condition conflicts must abort preflight without writes.'
+
+    $fixture.Assignments.Clear()
+    $fixture.Creates.Clear()
+    $fixture.FailCreateAt = 2
+    try { & $ScriptPath @parameters -Apply -Confirm:$false; throw 'Expected CLI create failure.' }
+    catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
+    Assert-True ($fixture.Assignments.Count -eq 1) 'Create failures must surface without hiding earlier successful grants.'
+    $fixture.ReadFailure = $true
+    try { & $ScriptPath @parameters; throw 'Expected CLI read failure.' }
+    catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
+    Write-Output 'PASS: preview, bounded scopes, required condition, identity separation, WhatIf, apply, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
+}
+finally {
+    Remove-Item -LiteralPath $conditionPath -ErrorAction SilentlyContinue
+    if ($null -ne $previousExitCode) { $global:LASTEXITCODE = $previousExitCode.Value }
+    else { Remove-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
+}

@@ -148,6 +148,78 @@ References:
 [Managed Applications linked-resource identity](https://learn.microsoft.com/azure/azure-resource-manager/managed-applications/publish-managed-identity#linking-existing-azure-resources),
 and [constrained RBAC delegation](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-overview).
 
+### Optional permission setup script
+
+Download [Set-InstallationPermissions.ps1](Set-InstallationPermissions.ps1)
+and review it with your Azure administrator. It requires PowerShell 7, Azure
+CLI and `az login` to the intended customer tenant. Run it as a principal
+authorized to read the resources and create the requested scoped assignments.
+Any required PIM privileges must already be active.
+
+The script does not create managed identities, deploy the application, configure
+Blueprint federation, change Graph consent or grant runtime data-plane roles.
+It previews by default. It checks existing/inherited assignments for the same
+principal and role, skips matching grants, and refuses conflicting conditions.
+It does not evaluate all effective permissions or remove broader existing
+access. It does not change the active Azure CLI subscription.
+
+For **new Foundry**, preview identity-attachment permissions:
+
+```powershell
+$permissions = @{
+    SubscriptionId = '<installation-subscription-id>'
+    RuntimeIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<runtime-mi>'
+    InstallerPrincipalObjectId = '<installing-user-object-id>'
+    InstallerPrincipalType = 'User'
+    OnBehalfPrincipalObjectId = '<verified-platform-service-principal-object-id>'
+}
+.\Set-InstallationPermissions.ps1 @permissions
+```
+
+Supply tenant-local **object IDs**, not application/client IDs, for both
+principal parameters. Verify the on-behalf-of enterprise application with the
+identity administrator; the script deliberately performs no Graph discovery.
+For a group or automation installer, change `InstallerPrincipalType` to
+`Group` or `ServicePrincipal` as appropriate.
+
+For **existing Foundry**, additionally supply the separate deployment UAMI,
+account resource ID and a local UTF-8 text file containing the security owner's
+approved Azure RBAC delegation condition expression:
+
+```powershell
+$permissions.DeploymentIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<deployment-mi>'
+$permissions.FoundryAccountResourceId = '/subscriptions/<installation-subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.CognitiveServices/accounts/<account-name>'
+$permissions.DelegationConditionFile = '.\approved-foundry-delegation-condition.txt'
+.\Set-InstallationPermissions.ps1 @permissions
+```
+
+The Foundry account must be in the installation subscription. The condition
+must authorize the grants described above without opening unintended role
+delegation. The script requires a nonempty condition and uses condition version
+`2.0`; it cannot certify that an expression is safe or sufficient. In particular,
+permitting RBAC Administrator delegation without appropriate recipient controls
+can enable privilege escalation. Azure validates the expression when applied.
+Do not substitute a generic "allow all" expression merely to pass this check.
+
+Review the preview's principal IDs, exact scopes and condition, then apply:
+
+```powershell
+.\Set-InstallationPermissions.ps1 @permissions -Apply -Confirm
+```
+
+Existing Foundry adds Contributor on its resource group, condition-restricted
+RBAC Administrator on its account, and Managed Identity Operator for the
+deployment identity on the runtime UAMI. Both installer and platform caller
+receive Managed Identity Operator only on the supplied identity resources.
+There is no subscription-wide Owner or platform-principal Foundry Contributor
+grant.
+
+Azure role assignments are not transactional. A failed later create does not
+roll back earlier assignments; the script reports errors and can be rerun to
+skip matching grants. Allow RBAC propagation before installing. Successful
+assignment creation is not proof of effective authorization, working federation
+or completed application installation.
+
 ## 2. Prepare deployment inputs
 
 Use the form tooltips and an approved customer handover worksheet.
