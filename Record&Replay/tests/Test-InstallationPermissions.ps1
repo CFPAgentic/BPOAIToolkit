@@ -17,6 +17,11 @@ $fixture = @{
     Assignments = [Collections.Generic.List[object]]::new()
     FailCreateAt = 0
     ReadFailure = $false
+    LoginType = 'user'
+    SignedInUserId = '77777777-8888-9999-aaaa-bbbbbbbbbbbb'
+    SignedInUserReads = 0
+    SignedInUserFailure = $false
+    ActiveTenantId = $tenant
 }
 $previousExitCode = Get-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
 
@@ -40,7 +45,16 @@ function az {
         return
     }
     switch ($arguments[0..1] -join ' ') {
-        'account show' { return @{tenantId=$tenant;state='Enabled'} | ConvertTo-Json }
+        'account show' {
+            $accountTenant = if (Get-Option $arguments '--subscription') { $tenant } else { $fixture.ActiveTenantId }
+            return @{tenantId=$accountTenant;state='Enabled';user=@{type=$fixture.LoginType;name='installer@example.invalid'}} | ConvertTo-Json
+        }
+        'ad signed-in-user' {
+            Assert-True (-not ($arguments -contains '--subscription')) 'The directory command must not receive unsupported subscription arguments.'
+            $fixture.SignedInUserReads++
+            if ($fixture.SignedInUserFailure) { $global:LASTEXITCODE = 1; return }
+            return @{id=$fixture.SignedInUserId} | ConvertTo-Json
+        }
         'identity show' {
             $id = Get-Option $arguments '--ids'
             $principal = if ($id -eq $runtimeId) { $runtimePrincipal } else { $deploymentPrincipal }
@@ -83,7 +97,32 @@ $conditionPath = Join-Path ([IO.Path]::GetTempPath()) ("bpo-condition-test-$([gu
 try {
     # This fixture is deliberately not a deployable or approved RBAC condition.
     [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
+    $automaticParameters = $parameters.Clone()
+    $automaticParameters.Remove('InstallerPrincipalObjectId')
+    $automaticPreview = @(& $ScriptPath @automaticParameters -InformationVariable installerMessages)
+    Assert-True ($automaticPreview[0].PrincipalId -eq $fixture.SignedInUserId -and $fixture.SignedInUserReads -eq 1) 'Interactive login must default to the signed-in user object ID.'
+    Assert-True (($installerMessages.MessageData -join "`n") -match "Installer: $($fixture.SignedInUserId).*signed-in Azure CLI user") 'The resolved installer must be displayed before any changes.'
+    $fixture.SignedInUserFailure = $true
+    try { & $ScriptPath @automaticParameters; throw 'Expected signed-in-user lookup failure.' }
+    catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
+    $fixture.SignedInUserFailure = $false
+    $userReads = $fixture.SignedInUserReads
+    $fixture.ActiveTenantId = '88888888-9999-aaaa-bbbb-cccccccccccc'
+    try { & $ScriptPath @automaticParameters; throw 'Expected mismatched tenant rejection.' }
+    catch { if ($_.Exception.Message -notlike '*active Azure CLI user/tenant does not match*') { throw } }
+    Assert-True ($fixture.SignedInUserReads -eq $userReads) 'Mismatched tenant must be rejected before the Graph lookup.'
+    $fixture.ActiveTenantId = $tenant
+    $fixture.LoginType = 'servicePrincipal'
+    try { & $ScriptPath @automaticParameters; throw 'Expected non-user login rejection.' }
+    catch { if ($_.Exception.Message -notlike '*Non-user Azure CLI login*') { throw } }
+    $explicitParameters = $parameters.Clone()
+    $explicitParameters.InstallerPrincipalType = 'ServicePrincipal'
+    $explicitPreview = @(& $ScriptPath @explicitParameters)
+    Assert-True ($explicitPreview[0].PrincipalId -eq $parameters.InstallerPrincipalObjectId -and $fixture.SignedInUserReads -eq $userReads) 'Explicit automation installer must not require a Graph lookup.'
+    Assert-True ($fixture.Creates.Count -eq 0) 'Installer resolution and failures must cause no writes in preview.'
+    $fixture.LoginType = 'user'
     $preview = @(& $ScriptPath @parameters -InformationVariable previewMessages)
+    Assert-True ($fixture.SignedInUserReads -eq $userReads) 'An explicit human installer override must skip signed-in-user discovery.'
     Assert-True ($preview.Count -eq 2 -and $fixture.Creates.Count -eq 0) 'New Foundry preview must plan two grants without writes.'
     Assert-True (($previewMessages.MessageData -join "`n") -match 'PREVIEW ONLY: Already present: 0; missing: 2') 'Preview must report missing grants without claiming success.'
     Assert-True (@($preview | Where-Object { $_.Scope -ne $runtimeId -or $_.Role -ne 'Managed Identity Operator' }).Count -eq 0) 'Attachment grants must stay on the supplied identity.'
@@ -135,7 +174,7 @@ try {
     $fixture.ReadFailure = $true
     try { & $ScriptPath @parameters; throw 'Expected CLI read failure.' }
     catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
-    Write-Output 'PASS: preview, bounded scopes, required condition, identity separation, WhatIf, apply, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
+    Write-Output 'PASS: installer resolution/context guards, preview, bounded scopes, required condition, identity separation, WhatIf, apply, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
 }
 finally {
     Remove-Item -LiteralPath $conditionPath -ErrorAction SilentlyContinue

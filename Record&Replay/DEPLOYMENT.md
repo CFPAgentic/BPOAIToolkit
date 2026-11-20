@@ -169,18 +169,36 @@ For **new Foundry**, preview identity-attachment permissions:
 $permissions = @{
     SubscriptionId = '<installation-subscription-id>'
     RuntimeIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<runtime-mi>'
-    InstallerPrincipalObjectId = '<installing-user-object-id>'
-    InstallerPrincipalType = 'User'
     OnBehalfPrincipalObjectId = '<verified-platform-service-principal-object-id>'
 }
 .\Set-InstallationPermissions.ps1 @permissions
 ```
 
-Supply tenant-local **object IDs**, not application/client IDs, for both
-principal parameters. Verify the on-behalf-of enterprise application with the
-identity administrator; the script deliberately performs no Graph discovery.
-For a group or automation installer, change `InstallerPrincipalType` to
-`Group` or `ServicePrincipal` as appropriate.
+For interactive Azure CLI login, the installer defaults to the signed-in user.
+The script uses `az ad signed-in-user show` to read that user's tenant-local
+object ID and prints the selected principal, type and source before applying
+permissions. This is a read-only Microsoft Graph lookup; it does not change
+directory permissions or consent. The active CLI user and tenant must match
+the installation subscription login. A context mismatch or lookup failure
+stops the script rather than guessing an identity.
+
+If the permissions administrator is not the person who will install the offer,
+override the installer explicitly:
+
+```powershell
+$permissions.InstallerPrincipalObjectId = '<actual-installer-object-id>'
+$permissions.InstallerPrincipalType = 'User'
+```
+
+For service-principal or managed-identity Azure CLI login, both installer
+parameters must be supplied explicitly. Use `ServicePrincipal` for an automation
+installer or `Group` for an approved installer group. Explicit overrides skip
+the signed-in-user lookup.
+
+Supply tenant-local **object IDs**, not application/client IDs, for installer
+overrides and `OnBehalfPrincipalObjectId`. Verify the on-behalf-of enterprise
+application with the identity administrator; the script does not discover that
+principal through Graph.
 
 For **existing Foundry**, additionally supply the separate deployment UAMI,
 account resource ID and a local UTF-8 text file containing the security owner's

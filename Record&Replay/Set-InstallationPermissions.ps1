@@ -16,7 +16,6 @@ param(
     [Parameter(Mandatory)]
     [string]$RuntimeIdentityResourceId,
 
-    [Parameter(Mandatory)]
     [guid]$InstallerPrincipalObjectId,
 
     [ValidateSet('User', 'Group', 'ServicePrincipal')]
@@ -93,8 +92,12 @@ if ($hasFoundryInputs -and (
     [string]::IsNullOrWhiteSpace($DelegationConditionFile))) {
     throw 'Existing Foundry requires DeploymentIdentityResourceId, FoundryAccountResourceId and DelegationConditionFile together.'
 }
-foreach ($principal in @($InstallerPrincipalObjectId, $OnBehalfPrincipalObjectId)) {
-    if ($principal -eq [guid]::Empty) { throw 'Principal object IDs must not be empty GUIDs.' }
+if ($OnBehalfPrincipalObjectId -eq [guid]::Empty -or
+    ($PSBoundParameters.ContainsKey('InstallerPrincipalObjectId') -and $InstallerPrincipalObjectId -eq [guid]::Empty)) {
+    throw 'Principal object IDs must not be empty GUIDs.'
+}
+if (-not $PSBoundParameters.ContainsKey('InstallerPrincipalObjectId') -and $InstallerPrincipalType -ne 'User') {
+    throw 'InstallerPrincipalObjectId is required when InstallerPrincipalType is not User.'
 }
 
 $condition = ''
@@ -115,6 +118,28 @@ if ($hasFoundryInputs) {
 
 $account = Invoke-AzJson -Arguments @('account', 'show', '--subscription', "$SubscriptionId")
 if ($account.state -ne 'Enabled') { throw 'The selected subscription is not enabled.' }
+if ($account.user.type -ne 'user' -and (
+    -not $PSBoundParameters.ContainsKey('InstallerPrincipalObjectId') -or
+    -not $PSBoundParameters.ContainsKey('InstallerPrincipalType'))) {
+    throw 'Non-user Azure CLI login: supply InstallerPrincipalObjectId and InstallerPrincipalType explicitly for the intended installer.'
+}
+$installerSource = 'explicit override'
+if (-not $PSBoundParameters.ContainsKey('InstallerPrincipalObjectId')) {
+    $activeAccount = Invoke-AzJson -Arguments @('account', 'show')
+    if ($activeAccount.tenantId -ne $account.tenantId -or
+        $activeAccount.user.type -ne 'user' -or
+        $activeAccount.user.name -ne $account.user.name) {
+        throw 'The active Azure CLI user/tenant does not match the installation subscription login. Select the intended CLI context or supply InstallerPrincipalObjectId explicitly.'
+    }
+    $signedInUser = Invoke-AzJson -Arguments @('ad', 'signed-in-user', 'show')
+    $resolvedObjectId = [guid]::Empty
+    if (-not [guid]::TryParse("$($signedInUser.id)", [ref]$resolvedObjectId) -or $resolvedObjectId -eq [guid]::Empty) {
+        throw 'Azure CLI did not return a valid signed-in user object ID. Supply InstallerPrincipalObjectId explicitly.'
+    }
+    $InstallerPrincipalObjectId = $resolvedObjectId
+    $installerSource = 'signed-in Azure CLI user'
+}
+Write-Information "Installer: $InstallerPrincipalObjectId | Type: $InstallerPrincipalType | Source: $installerSource" -InformationAction Continue
 $runtime = Get-Identity $RuntimeIdentityResourceId
 $identities = @($runtime)
 $deployment = $null
