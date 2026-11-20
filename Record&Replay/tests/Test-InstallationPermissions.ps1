@@ -1,7 +1,6 @@
 #Requires -Version 7.0
 param(
-    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Set-InstallationPermissions.ps1'),
-    [string]$SamplePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'foundry-delegation-condition.sample.txt')
+    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'Set-InstallationPermissions.ps1')
 )
 
 Set-StrictMode -Version Latest
@@ -94,10 +93,7 @@ $parameters = @{
     InstallerPrincipalObjectId = '55555555-6666-7777-8888-999999999999'
     OnBehalfPrincipalObjectId = '66666666-7777-8888-9999-aaaaaaaaaaaa'
 }
-$conditionPath = Join-Path ([IO.Path]::GetTempPath()) ("bpo-condition-test-$([guid]::NewGuid().ToString('N')).txt")
 try {
-    # This fixture is deliberately not a deployable or approved RBAC condition.
-    [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
     $automaticParameters = $parameters.Clone()
     $automaticParameters.Remove('InstallerPrincipalObjectId')
     $automaticPreview = @(& $ScriptPath @automaticParameters -InformationVariable installerMessages)
@@ -131,71 +127,39 @@ try {
     $existingParameters = $parameters.Clone()
     $existingParameters.DeploymentIdentityResourceId = $deploymentId
     $existingParameters.FoundryAccountResourceId = $foundryId
-    $existingParameters.DelegationConditionFile = $conditionPath
-    $sample = Get-Content -LiteralPath $SamplePath -Raw
-    $sampleParameters = $existingParameters.Clone()
-    $sampleParameters.DelegationConditionFile = $SamplePath
-    try { & $ScriptPath @sampleParameters -Apply -Confirm:$false; throw 'Expected unresolved sample rejection.' }
-    catch { if ($_.Exception.Message -notlike '*unresolved sample placeholders*') { throw } }
-    Assert-True ($fixture.Creates.Count -eq 0) 'Unresolved sample conditions must be rejected before writes.'
-    $agentInstallerPrincipal = '99999999-aaaa-bbbb-cccc-dddddddddddd'
-    $resolvedSample = $sample.Replace('<AGENT_INSTALLER_PRINCIPAL_ID>', $agentInstallerPrincipal).Replace('<RUNTIME_MI_PRINCIPAL_ID>', $runtimePrincipal)
-    function Test-SampleRequest {
-        param([string]$Action, [string]$RoleId, [string]$PrincipalId)
-        $expression = [regex]::Replace($resolvedSample, "ActionMatches\{'([^']+)'\}", {
-            param($match)
-            if ($match.Groups[1].Value -eq $Action) { '$true' } else { '$false' }
-        })
-        $expression = [regex]::Replace($expression, '@Request\[Microsoft.Authorization/roleAssignments:(RoleDefinitionId|PrincipalId)\] ForAnyOfAnyValues:GuidEquals \{([^}]+)\}', {
-            param($match)
-            $value = if ($match.Groups[1].Value -eq 'RoleDefinitionId') { $RoleId } else { $PrincipalId }
-            if (($match.Groups[2].Value.Split(',').Trim()) -contains $value) { '$true' } else { '$false' }
-        })
-        $expression = $expression -replace '\bAND\b', '-and' -replace '\bOR\b', '-or' -replace '!', '-not ' -replace '\s+', ' '
-        return & ([scriptblock]::Create($expression))
-    }
-    $writeAction = 'Microsoft.Authorization/roleAssignments/write'
-    Assert-True (Test-SampleRequest $writeAction 'a97b65f3-24c7-4388-baec-2e87135dc908' $runtimePrincipal) 'Sample must allow runtime inference access.'
-    Assert-True (Test-SampleRequest $writeAction 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $agentInstallerPrincipal) 'Sample must allow delegation only to the named agent installer.'
-    Assert-True (Test-SampleRequest $writeAction '53ca6127-db72-4b80-b1b0-d745d6d5456d' $runtimePrincipal) 'Sample must allow runtime project readiness access.'
-    Assert-True (-not (Test-SampleRequest $writeAction 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $runtimePrincipal)) 'Sample must not delegate RBAC administration to the runtime identity.'
-    Assert-True (-not (Test-SampleRequest $writeAction 'a97b65f3-24c7-4388-baec-2e87135dc908' $deploymentPrincipal)) 'Sample must not grant access to unrelated recipients.'
-    Assert-True (-not (Test-SampleRequest $writeAction '8e3af657-a8ff-443c-a75c-2fe8c4bcb635' $agentInstallerPrincipal)) 'Sample must not permit Owner grants.'
-    Assert-True (-not (Test-SampleRequest 'Microsoft.Authorization/roleAssignments/delete' 'a97b65f3-24c7-4388-baec-2e87135dc908' $runtimePrincipal)) 'Sample must deny role-assignment deletion.'
-    [IO.File]::WriteAllText($conditionPath, $resolvedSample)
-    $samplePreview = @(& $ScriptPath @existingParameters)
-    Assert-True (($samplePreview | Where-Object Role -eq 'Role Based Access Control Administrator').Condition -ceq $resolvedSample.Trim()) 'A resolved sample must be forwarded without silently changing its condition.'
-    [IO.File]::WriteAllText($conditionPath, 'TEST-ONLY-ADMINISTRATOR-CONDITION')
     $preview = @(& $ScriptPath @existingParameters)
     Assert-True ($preview.Count -eq 7 -and $fixture.Creates.Count -eq 0) 'Existing Foundry preview must plan seven scoped grants without writes.'
     $delegation = @($preview | Where-Object Role -eq 'Role Based Access Control Administrator')
-    Assert-True ($delegation.Count -eq 1 -and $delegation[0].Scope -eq $foundryId -and $delegation[0].Condition -eq 'TEST-ONLY-ADMINISTRATOR-CONDITION') 'Delegation must use the approved condition at the account scope.'
+    Assert-True ($delegation.Count -eq 1 -and $delegation[0].Scope -eq $foundryId -and $delegation[0].Condition -eq '') 'Unconditioned delegation must stay at the Foundry account scope.'
     $contributor = @($preview | Where-Object Role -eq 'Contributor')
     Assert-True ($contributor.Count -eq 1 -and $contributor[0].Scope -eq "/subscriptions/$subscription/resourceGroups/foundry") 'Contributor must be scoped to the Foundry resource group.'
 
     $invalidParameters = $existingParameters.Clone()
-    $invalidParameters.Remove('DelegationConditionFile')
-    try { & $ScriptPath @invalidParameters; throw 'Expected missing-condition rejection.' }
+    $invalidParameters.Remove('DeploymentIdentityResourceId')
+    try { & $ScriptPath @invalidParameters; throw 'Expected missing deployment identity rejection.' }
     catch { if ($_.Exception.Message -notlike '*requires*together*') { throw } }
     $invalidParameters = $existingParameters.Clone()
     $invalidParameters.DeploymentIdentityResourceId = $runtimeId
     try { & $ScriptPath @invalidParameters; throw 'Expected shared-identity rejection.' }
     catch { if ($_.Exception.Message -notlike '*separate runtime*') { throw } }
     Assert-True ($fixture.Creates.Count -eq 0) 'Invalid inputs must cause no writes.'
+    try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected privileged opt-in rejection.' }
+    catch { if ($_.Exception.Message -notlike '*requires -AllowUnrestrictedFoundryRbac*') { throw } }
+    Assert-True ($fixture.Creates.Count -eq 0) 'Missing privileged opt-in must abort before any assignment is created.'
 
     $null = & $ScriptPath @existingParameters -Apply -WhatIf -InformationVariable whatIfMessages
     Assert-True ($fixture.Creates.Count -eq 0) 'WhatIf must never create assignments.'
     Assert-True (($whatIfMessages.MessageData -join "`n") -match 'PREVIEW ONLY: Already present: 0; missing: 7') 'WhatIf must not report unapplied grants as passed.'
-    $applied = @(& $ScriptPath @existingParameters -Apply -Confirm:$false -InformationVariable applyMessages)
+    $applied = @(& $ScriptPath @existingParameters -Apply -AllowUnrestrictedFoundryRbac -Confirm:$false -InformationVariable applyMessages)
     Assert-True ($fixture.Creates.Count -eq 7 -and @($applied | Where-Object Status -ne 'Created').Count -eq 0) 'Apply must create and verify seven grants.'
     Assert-True (($applyMessages.MessageData -join "`n") -match 'PASS: All 7 required role assignments match. Created: 7; already present: 0') 'Apply must report a clear passing count.'
     $delegationCall = @($fixture.Creates | Where-Object { (Get-Option $_ '--role') -eq 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' })
-    Assert-True ((Get-Option $delegationCall[0] '--condition-version') -eq '2.0') 'Condition version must reach Azure CLI.'
+    Assert-True (-not ($delegationCall[0] -contains '--condition') -and -not ($delegationCall[0] -contains '--condition-version')) 'RBAC Administrator creation must not require or submit a condition.'
     $repeated = @(& $ScriptPath @existingParameters -Apply -Confirm:$false -InformationVariable repeatMessages)
     Assert-True ($fixture.Creates.Count -eq 7 -and @($repeated | Where-Object Status -ne 'AlreadyPresent').Count -eq 0) 'A repeated apply must skip matching assignments.'
     Assert-True (($repeatMessages.MessageData -join "`n") -match 'PASS: All 7 required role assignments match. Created: 0; already present: 7') 'Existing matching permissions must pass, not fail.'
 
-    ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = ''
+    ($fixture.Assignments | Where-Object { $_.roleDefinitionId -like '*f58310d9-a9f6-439a-9e8d-f62e7b41a168' }).condition = 'EXISTING-ADMIN-APPROVED-CONDITION'
     try { & $ScriptPath @existingParameters -Apply -Confirm:$false; throw 'Expected condition conflict.' }
     catch { if ($_.Exception.Message -notlike '*different delegation conditions*') { throw } }
     Assert-True ($fixture.Creates.Count -eq 7) 'Condition conflicts must abort preflight without writes.'
@@ -209,10 +173,9 @@ try {
     $fixture.ReadFailure = $true
     try { & $ScriptPath @parameters; throw 'Expected CLI read failure.' }
     catch { if ($_.Exception.Message -notlike '*Azure CLI failed*') { throw } }
-    Write-Output 'PASS: installer resolution/context guards, preview, bounded scopes, required condition, identity separation, WhatIf, apply, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
+    Write-Output 'PASS: installer resolution/context guards, preview, bounded scopes, privileged opt-in, condition-free apply, identity separation, WhatIf, rerun, conflict and CLI failure handling. All Azure CLI calls were mocked.'
 }
 finally {
-    Remove-Item -LiteralPath $conditionPath -ErrorAction SilentlyContinue
     if ($null -ne $previousExitCode) { $global:LASTEXITCODE = $previousExitCode.Value }
     else { Remove-Variable LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
 }

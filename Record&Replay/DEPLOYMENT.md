@@ -102,8 +102,9 @@ assign Foundry User to the runtime UAMI at the project.
 The installer's constrained delegation permits only Cognitive Services User
 role-assignment creation and prohibits deletion. Permission to assign the
 RBAC Administrator role is itself privileged: have the security owner constrain
-allowed roles and recipient principals where practical, rather than granting
-subscription-wide Owner or unrestricted delegation.
+allowed roles and recipient principals where practical, and avoid
+subscription-wide Owner. The optional helper below deliberately uses
+unconditioned account-scoped delegation only with explicit security approval.
 
 The package attaches the dedicated UAMI to the Managed Application through
 the special `managedIdentity` form output. It does not create that UAMI or
@@ -200,69 +201,49 @@ overrides and `OnBehalfPrincipalObjectId`. Verify the on-behalf-of enterprise
 application with the identity administrator; the script does not discover that
 principal through Graph.
 
-For **existing Foundry**, additionally supply the separate deployment UAMI,
-account resource ID and a local UTF-8 text file containing the security owner's
-approved Azure RBAC delegation condition expression:
-
-Start with
-[foundry-delegation-condition.sample.txt](foundry-delegation-condition.sample.txt).
-Copy it to a customer-owned file, replace the placeholders below, then obtain
-administrator approval. The supplied sample is deliberately **not ready to
-apply**; the script rejects unresolved placeholders.
-
-```powershell
-Copy-Item '.\foundry-delegation-condition.sample.txt' '.\approved-foundry-delegation-condition.txt'
-```
-
-| Placeholder | Replacement |
-|---|---|
-| `<RUNTIME_MI_PRINCIPAL_ID>` | Shared runtime UAMI's principal/object ID, not its client ID or resource ID |
-| `<AGENT_INSTALLER_PRINCIPAL_ID>` | Verified principal/object ID of this installation's generated `video-copy-*` UAMI, not `image-push-*`, the human installer or the deployment UAMI |
-
-The sample permits Cognitive Services User grants to the agent installer and
-runtime identity, RBAC Administrator grants only to the agent installer, and
-Foundry User grants only to the runtime identity. It blocks role-assignment
-deletion. Apply the enclosing role assignment only at the selected Foundry
-account scope.
-
-**Fresh-installation limitation:** the agent installer's principal ID is
-generated during deployment and cannot be inferred from its resource name.
-This sample cannot establish all permissions before a fresh installation
-unless the verified identity is already available through an approved staged
-installation procedure. Have the deployment/security owner arrange that
-procedure or approve another suitable delegation design. Do not start a
-deployment just to make it fail, copy a principal from another installation,
-or remove the recipient restriction to avoid this prerequisite.
-
-Recipient restrictions do not enforce the condition on a newly delegated RBAC
-Administrator assignment. The deployment template applies the installer's
-inference-only condition; this outer sample cannot certify that nested
-condition or make arbitrary RBAC Administrator delegation safe. Approve both
-the template and this condition. Deletion/cleanup may require a separate
-administrator because the sample intentionally denies role-assignment deletion.
+For **existing Foundry**, additionally supply the separate deployment UAMI
+and account resource ID. No delegation condition file or generated installer
+principal ID is required.
 
 ```powershell
 $permissions.DeploymentIdentityResourceId = '/subscriptions/<subscription-id>/resourceGroups/<identity-rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<deployment-mi>'
 $permissions.FoundryAccountResourceId = '/subscriptions/<installation-subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.CognitiveServices/accounts/<account-name>'
-$permissions.DelegationConditionFile = '.\approved-foundry-delegation-condition.txt'
 .\Set-InstallationPermissions.ps1 @permissions
 ```
 
-The Foundry account must be in the installation subscription. The condition
-must authorize the grants described above without opening unintended role
-delegation. The script requires a nonempty condition and uses condition version
-`2.0`; it cannot certify that an expression is safe or sufficient. In particular,
-permitting RBAC Administrator delegation without appropriate recipient controls
-can enable privilege escalation. Azure validates the expression when applied.
-Do not substitute a generic "allow all" expression merely to pass this check.
+The Foundry account must be in the installation subscription. The simplified
+helper assigns **RBAC Administrator without a delegation condition** at that
+account scope. This permits unrestricted role-assignment management at the
+account and its children, including delegation of privileged roles. The
+separate Contributor grant covers the existing Foundry resource group.
+Obtain explicit security-owner approval for this access. If policy requires
+constrained delegation, use an administrator-approved alternative rather than
+this helper.
 
-Review the preview's principal IDs, exact scopes and condition, then apply:
+Review the preview's principal IDs and exact scopes. For **new Foundry**, apply:
 
 ```powershell
 .\Set-InstallationPermissions.ps1 @permissions -Apply -Confirm
 ```
 
-Existing Foundry adds Contributor on its resource group, condition-restricted
+For **existing Foundry**, explicitly acknowledge the unconditioned account
+RBAC grant when applying:
+
+```powershell
+.\Set-InstallationPermissions.ps1 @permissions -Apply -AllowUnrestrictedFoundryRbac -Confirm
+```
+
+The opt-in is required before any writes if the unconditioned RBAC assignment
+is missing. A preview or `-WhatIf` does not require the opt-in. A rerun where
+all required grants already match skips them without requiring another opt-in.
+If you still have `DelegationConditionFile` in an existing `$permissions`
+hashtable, remove that obsolete entry before running the updated script:
+
+```powershell
+$permissions.Remove('DelegationConditionFile')
+```
+
+Existing Foundry adds Contributor on its resource group, unconditioned
 RBAC Administrator on its account, and Managed Identity Operator for the
 deployment identity on the runtime UAMI. Both installer and platform caller
 receive Managed Identity Operator only on the supplied identity resources.

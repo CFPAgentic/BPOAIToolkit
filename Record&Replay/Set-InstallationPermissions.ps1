@@ -5,8 +5,8 @@ Previews or creates scoped Azure RBAC prerequisites for Record & Replay.
 .DESCRIPTION
 Requires Azure CLI login and existing identities. Does not create identities,
 change Graph permissions, configure Blueprint federation or deploy resources.
-For existing Foundry, provide a condition file reviewed by your security owner.
-The script does not generate or certify delegation conditions.
+Existing Foundry uses account-scoped RBAC Administrator without a condition.
+Creating that privileged assignment requires explicit administrator opt-in.
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -26,7 +26,7 @@ param(
 
     [string]$DeploymentIdentityResourceId,
     [string]$FoundryAccountResourceId,
-    [string]$DelegationConditionFile,
+    [switch]$AllowUnrestrictedFoundryRbac,
     [switch]$Apply
 )
 
@@ -69,7 +69,7 @@ function Get-Identity {
 function New-Grant {
     param(
         [string]$PrincipalId, [string]$PrincipalType, [string]$Role,
-        [string]$RoleId, [string]$Scope, [string]$Condition = ''
+        [string]$RoleId, [string]$Scope
     )
     [pscustomobject]@{
         PrincipalId = $PrincipalId
@@ -77,20 +77,18 @@ function New-Grant {
         Role = $Role
         RoleId = $RoleId
         Scope = $Scope
-        Condition = $Condition
+        Condition = ''
         Existing = $false
     }
 }
 
 $RuntimeIdentityResourceId = $RuntimeIdentityResourceId.Trim().TrimEnd('/')
 $hasFoundryInputs = -not [string]::IsNullOrWhiteSpace($DeploymentIdentityResourceId) -or
-    -not [string]::IsNullOrWhiteSpace($FoundryAccountResourceId) -or
-    -not [string]::IsNullOrWhiteSpace($DelegationConditionFile)
+    -not [string]::IsNullOrWhiteSpace($FoundryAccountResourceId)
 if ($hasFoundryInputs -and (
     [string]::IsNullOrWhiteSpace($DeploymentIdentityResourceId) -or
-    [string]::IsNullOrWhiteSpace($FoundryAccountResourceId) -or
-    [string]::IsNullOrWhiteSpace($DelegationConditionFile))) {
-    throw 'Existing Foundry requires DeploymentIdentityResourceId, FoundryAccountResourceId and DelegationConditionFile together.'
+    [string]::IsNullOrWhiteSpace($FoundryAccountResourceId))) {
+    throw 'Existing Foundry requires DeploymentIdentityResourceId and FoundryAccountResourceId together.'
 }
 if ($OnBehalfPrincipalObjectId -eq [guid]::Empty -or
     ($PSBoundParameters.ContainsKey('InstallerPrincipalObjectId') -and $InstallerPrincipalObjectId -eq [guid]::Empty)) {
@@ -100,7 +98,6 @@ if (-not $PSBoundParameters.ContainsKey('InstallerPrincipalObjectId') -and $Inst
     throw 'InstallerPrincipalObjectId is required when InstallerPrincipalType is not User.'
 }
 
-$condition = ''
 if ($hasFoundryInputs) {
     $DeploymentIdentityResourceId = $DeploymentIdentityResourceId.Trim().TrimEnd('/')
     $FoundryAccountResourceId = $FoundryAccountResourceId.Trim().TrimEnd('/')
@@ -110,13 +107,7 @@ if ($hasFoundryInputs) {
     if ($FoundryAccountResourceId -notmatch "^/subscriptions/$SubscriptionId/resourceGroups/[^/]+/providers/Microsoft\.CognitiveServices/accounts/[^/]+$") {
         throw 'FoundryAccountResourceId must identify an account in the installation subscription.'
     }
-    $condition = (Get-Content -LiteralPath $DelegationConditionFile -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($condition)) {
-        throw 'The administrator-approved delegation condition file must not be empty.'
-    }
-    if ($condition -match '<[A-Z][A-Z0-9_]*>') {
-        throw 'The delegation condition contains unresolved sample placeholders. Replace them with verified principal object IDs and obtain administrator approval before running.'
-    }
+    Write-Warning "Existing Foundry uses RBAC Administrator WITHOUT a delegation condition at $FoundryAccountResourceId. This permits unrestricted role-assignment management at that account and its children. Obtain security approval before applying."
 }
 
 $account = Invoke-AzJson -Arguments @('account', 'show', '--subscription', "$SubscriptionId")
@@ -177,7 +168,7 @@ $grants = @(
 if ($hasFoundryInputs) {
     $foundryResourceGroup = ($FoundryAccountResourceId.Split('/')[0..4] -join '/')
     $grants += New-Grant $deployment.principalId 'ServicePrincipal' 'Contributor' 'b24988ac-6180-42a0-ab88-20f7382dd24c' $foundryResourceGroup
-    $grants += New-Grant $deployment.principalId 'ServicePrincipal' 'Role Based Access Control Administrator' 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $FoundryAccountResourceId $condition
+    $grants += New-Grant $deployment.principalId 'ServicePrincipal' 'Role Based Access Control Administrator' 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' $FoundryAccountResourceId
     $grants += New-Grant $deployment.principalId 'ServicePrincipal' 'Managed Identity Operator' $operatorRole $runtime.id
 }
 
@@ -193,17 +184,24 @@ foreach ($grant in $grants) {
         ($_.roleDefinitionId.Split('/')[-1]) -eq $grant.RoleId
     })
     foreach ($assignment in $matching) {
-        if ("$($assignment.condition)".Trim() -cne $grant.Condition -or
-            ($grant.Condition -and $assignment.conditionVersion -ne '2.0')) {
+        if (-not [string]::IsNullOrWhiteSpace("$($assignment.condition)")) {
             throw "Existing $($grant.Role) assignment has different delegation conditions at $($assignment.scope). Review it manually; no assignments have been changed."
         }
     }
     $grant.Existing = $matching.Count -gt 0
 }
 
+$missingPrivilegedGrant = @($grants | Where-Object {
+    $_.RoleId -eq 'f58310d9-a9f6-439a-9e8d-f62e7b41a168' -and -not $_.Existing
+})
+if ($Apply -and -not $WhatIfPreference -and $missingPrivilegedGrant.Count -gt 0 -and
+    -not $AllowUnrestrictedFoundryRbac) {
+    throw 'Creating account-scoped RBAC Administrator without a condition requires -AllowUnrestrictedFoundryRbac after security approval. No assignments have been changed.'
+}
+
 Write-Information "Tenant: $($account.tenantId); installation subscription: $SubscriptionId" -InformationAction Continue
 if (-not $Apply) {
-    Write-Information 'PREVIEW ONLY. No assignments will be created. Review scopes, principals and the condition before rerunning with -Apply.' -InformationAction Continue
+    Write-Information 'PREVIEW ONLY. No assignments will be created. Review scopes, principals and privileged access before rerunning with -Apply.' -InformationAction Continue
 }
 else {
     Write-Warning 'Role assignments are not transactional. If a later create fails, earlier successful creates remain. Resolve the error and rerun; existing matching grants are skipped.'
@@ -221,15 +219,11 @@ foreach ($grant in $grants) {
             '--role', $grant.RoleId, '--scope', $grant.Scope,
             '--subscription', (Get-ResourceSubscription $grant.Scope)
         )
-        if ($grant.Condition) {
-            $arguments += @('--condition', $grant.Condition, '--condition-version', '2.0')
-        }
         $created = Invoke-AzJson -Arguments $arguments
         if ($created.principalId -ne $grant.PrincipalId -or
             $created.scope -ne $grant.Scope -or
             $created.roleDefinitionId.Split('/')[-1] -ne $grant.RoleId -or
-            "$($created.condition)".Trim() -cne $grant.Condition -or
-            ($grant.Condition -and $created.conditionVersion -ne '2.0')) {
+            -not [string]::IsNullOrWhiteSpace("$($created.condition)")) {
             throw 'Azure returned an assignment that does not match the requested grant. Review the assignment before continuing.'
         }
         $status = 'Created'
